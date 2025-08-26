@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 🎨 WIDGETS - Site Surveyor Pro v16.0
-Widgets personalizados COMPLETOS Y FUNCIONALES
+Widgets personalizados CON MONITOREO AUTOMÁTICO - CORREGIDO v2
 """
 
 from PySide6.QtWidgets import *
@@ -197,7 +197,7 @@ class MiniChart(QWidget):
             painter.drawEllipse(points[-1], 3, 3)
 
 class ServiceMonitor(QWidget):
-    """Widget para monitoreo de servicios con mini gráficas"""
+    """Widget para monitoreo de servicios CON TIMER AUTOMÁTICO - CORREGIDO v2"""
     
     def __init__(self, service_name: str, service_url: str, color: str, parent=None):
         super().__init__(parent)
@@ -206,6 +206,11 @@ class ServiceMonitor(QWidget):
         self.color = color
         self.current_latency = 0
         self.is_monitoring = False
+        
+        # AGREGADO: Timer automático para monitoreo
+        self.monitor_timer = QTimer()
+        self.monitor_timer.timeout.connect(self.auto_ping)
+        self.monitor_timer.setInterval(5000)  # Ping cada 5 segundos
         
         self.setup_ui()
     
@@ -274,57 +279,89 @@ class ServiceMonitor(QWidget):
     def update_latency(self, latency_ms: float):
         """Actualiza la latencia mostrada"""
         self.current_latency = latency_ms
-        self.latency_label.setText(f"{latency_ms:.0f} ms")
+        
+        if latency_ms >= 999:
+            self.latency_label.setText("ERR")
+            color = "#F44336"
+        else:
+            self.latency_label.setText(f"{latency_ms:.0f} ms")
+            if latency_ms < 30:
+                color = "#4CAF50"
+            elif latency_ms < 100:
+                color = "#FFC107"
+            else:
+                color = "#F44336"
         
         self.mini_chart.add_data_point(latency_ms)
-        
-        if latency_ms < 30:
-            color = "#4CAF50"
-        elif latency_ms < 100:
-            color = "#FFC107"
-        else:
-            color = "#F44336"
-            
         self.latency_label.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 11px;")
     
     def manual_ping(self):
         """Ejecuta ping manual"""
+        self.execute_ping()
+    
+    def auto_ping(self):
+        """Ejecuta ping automático (llamado por timer)"""
+        if self.is_monitoring:
+            self.execute_ping()
+    
+    def execute_ping(self):
+        """Ejecuta el ping real en thread separado"""
         def ping_worker():
             try:
                 if os.name == 'nt':
-                    cmd = ['ping', '-n', '1', self.service_url]
+                    cmd = ['ping', '-n', '1', '-w', '3000', self.service_url]
                 else:
-                    cmd = ['ping', '-c', '1', self.service_url]
+                    cmd = ['ping', '-c', '1', '-W', '3', self.service_url]
                 
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
                 
                 if result.returncode == 0:
                     if os.name == 'nt':
+                        # Windows: time=XXXms o time<1ms
                         match = re.search(r'time[<=](\d+)ms', result.stdout)
+                        if not match:
+                            match = re.search(r'time=(\d+)ms', result.stdout)
                     else:
+                        # Linux/Mac: time=X.XXX ms
                         match = re.search(r'time=(\d+\.?\d*)', result.stdout)
                     
                     if match:
                         latency = float(match.group(1))
+                        # Usar QTimer.singleShot para thread-safe GUI update
                         QTimer.singleShot(0, lambda: self.update_latency(latency))
                     else:
                         QTimer.singleShot(0, lambda: self.update_latency(999))
                 else:
                     QTimer.singleShot(0, lambda: self.update_latency(999))
                     
+            except subprocess.TimeoutExpired:
+                QTimer.singleShot(0, lambda: self.update_latency(999))
             except Exception as e:
                 print(f"Error en ping a {self.service_name}: {e}")
                 QTimer.singleShot(0, lambda: self.update_latency(999))
         
         threading.Thread(target=ping_worker, daemon=True).start()
-    def start_monitoring(self):
-     """Inicia monitoreo automático"""
-     self.is_monitoring = True
-
-def stop_monitoring(self):
-    """Detiene monitoreo automático"""  
-    self.is_monitoring = False
     
+    def start_monitoring(self):
+        """Inicia monitoreo automático CON TIMER"""
+        self.is_monitoring = True
+        self.monitor_timer.start()  # AGREGADO: Inicia timer automático
+        print(f"🟢 Iniciando monitoreo automático de {self.service_name}")
+        # Hacer primer ping inmediatamente
+        self.auto_ping()
+
+    def stop_monitoring(self):
+        """Detiene monitoreo automático"""  
+        self.is_monitoring = False
+        self.monitor_timer.stop()  # AGREGADO: Detiene timer automático
+        print(f"🛑 Deteniendo monitoreo automático de {self.service_name}")
+    
+    def toggle_monitoring(self):
+        """Alterna entre iniciar y detener monitoreo"""
+        if self.is_monitoring:
+            self.stop_monitoring()
+        else:
+            self.start_monitoring()
 
 class ZoomableGraphicsView(QGraphicsView):
     """Vista gráfica con capacidad de zoom"""

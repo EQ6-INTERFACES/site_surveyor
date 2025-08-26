@@ -1,4 +1,4 @@
-# ui/main_window.py
+# ui/main_window.py - CORREGIDO
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
@@ -342,7 +342,7 @@ class MainWindow(QMainWindow):
         self.log(f"📡 {len(networks)} redes detectadas")
     
     def update_wifi_table(self, networks: List[NetworkData]):
-        """Actualizar tabla de redes"""
+        """Actualizar tabla de redes - CORREGIDO"""
         self.wifi_table.setRowCount(len(networks))
         
         for row, network in enumerate(networks):
@@ -350,9 +350,10 @@ class MainWindow(QMainWindow):
             self.wifi_table.setItem(row, 1, QTableWidgetItem(network.bssid))
             
             rssi_item = QTableWidgetItem(f"{network.signal} dBm")
-            if network.rssi >= -60:
+            # CORREGIDO: Usar network.signal en lugar de network.rssi para comparación
+            if network.signal >= -60:
                 rssi_item.setBackground(QColor(200, 255, 200))
-            elif network.rssi >= -70:
+            elif network.signal >= -70:
                 rssi_item.setBackground(QColor(255, 255, 200))
             else:
                 rssi_item.setBackground(QColor(255, 200, 200))
@@ -362,16 +363,12 @@ class MainWindow(QMainWindow):
             self.wifi_table.setItem(row, 4, QTableWidgetItem(network.security))
     
     def toggle_all_services(self):
-        """Toggle todos los servicios"""
+        """Toggle todos los servicios - CORREGIDO"""
         any_active = any(w.is_monitoring for w in self.service_widgets.values())
         
         for widget in self.service_widgets.values():
-            if any_active:
-                if widget.is_monitoring:
-                    widget.toggle_monitoring()
-            else:
-                if not widget.is_monitoring:
-                    widget.toggle_monitoring()
+            # CORREGIDO: Ahora usa toggle_monitoring() que existe
+            widget.toggle_monitoring()
         
         self.toggle_all_btn.setText("⏸ Detener" if not any_active else "▶ Iniciar")
     
@@ -483,21 +480,27 @@ class MainWindow(QMainWindow):
             self.calibration_points = []
     
     def handle_survey_click(self, x: float, y: float):
-        """Manejar click de survey"""
+        """Manejar click de survey - CORREGIDO"""
         # Escanear redes
         networks = self.scanner.scan()
         if not networks:
             QMessageBox.warning(self, "Error", "No se detectaron redes")
             return
         
-        # Crear punto de survey
-        network_data = [NetworkData(**n.to_dict()) for n in networks]
+        # CORREGIDO: Los networks ya son NetworkData, no necesitan conversión
+        network_data = networks
         
         # Realizar pruebas de rendimiento
         iperf_results = self.scanner.perform_full_test()
         
         # Crear punto
-        survey_point = SurveyPoint(x=x, y=y, scan_data=network_data, iperf_results=iperf_results)
+        survey_point = SurveyPoint(
+            x=x, 
+            y=y, 
+            timestamp=datetime.now(),
+            networks=network_data, 
+            iperf_results=iperf_results
+        )
         self.survey_points.append(survey_point)
         
         # Agregar visualización
@@ -577,21 +580,19 @@ class MainWindow(QMainWindow):
         if file_path:
             # Preparar información del proyecto
             self.project_info.client_name = self.client_entry.text()
-            self.project_info.site_name = self.site_entry.text()
-            self.project_info.technician_name = self.technician_entry.text()
-            self.project_info.floor_plan_path = self.floor_plan_path
-            self.project_info.pixels_per_meter = self.pixels_per_meter
+            self.project_info.name = self.site_entry.text()
+            self.project_info.location = self.site_entry.text()
             
             # Generar reporte
             generator = ReportGenerator()
-            success = generator.generate(
-                file_path,
-                self.survey_points,
-                self.ap_positions,
-                self.project_info
+            success_path = generator.generate_report(
+                survey_points=self.survey_points,
+                networks=self.current_networks,
+                project_info=self.project_info.__dict__,
+                output_path=file_path
             )
             
-            if success:
+            if success_path:
                 QMessageBox.information(self, "Reporte", "Reporte generado exitosamente")
                 self.log(f"📄 Reporte generado: {os.path.basename(file_path)}")
             else:
@@ -609,9 +610,14 @@ class MainWindow(QMainWindow):
         
         if file_path:
             data = {
-                'project': self.project_info.to_dict(),
+                'project': {
+                    'client_name': self.client_entry.text(),
+                    'site_name': self.site_entry.text(),
+                    'technician_name': self.technician_entry.text(),
+                    'floor_plan_path': self.floor_plan_path,
+                    'pixels_per_meter': self.pixels_per_meter
+                },
                 'survey_points': [p.to_dict() for p in self.survey_points],
-                'ap_positions': {k: v.to_dict() for k, v in self.ap_positions.items()},
                 'timestamp': datetime.now().isoformat()
             }
             
@@ -627,37 +633,69 @@ class MainWindow(QMainWindow):
         )
         
         if file_path:
-            with open(file_path, 'r') as f:
-                data = json.load(f)
-            
-            # Cargar información del proyecto
-            project = data.get('project', {})
-            self.client_entry.setText(project.get('client', ''))
-            self.site_entry.setText(project.get('site', ''))
-            self.technician_entry.setText(project.get('technician', ''))
-            
-            # Cargar puntos de survey
-            self.survey_points = []
-            for point_data in data.get('survey_points', []):
-                # Reconstruir punto
-                x = point_data['x']
-                y = point_data['y']
-                scan_data = [NetworkData(**n) for n in point_data.get('scan_data', [])]
+            try:
+                with open(file_path, 'r') as f:
+                    data = json.load(f)
                 
-                iperf_data = point_data.get('iperf_results')
-                iperf_results = None
-                if iperf_data:
-                    iperf_results = IperfResults(**iperf_data)
+                # Cargar información del proyecto
+                project = data.get('project', {})
+                self.client_entry.setText(project.get('client_name', ''))
+                self.site_entry.setText(project.get('site_name', ''))
+                self.technician_entry.setText(project.get('technician_name', ''))
                 
-                survey_point = SurveyPoint(x=x, y=y, scan_data=scan_data, iperf_results=iperf_results)
-                self.survey_points.append(survey_point)
+                # Limpiar puntos existentes
+                self.survey_points = []
                 
-                # Visualizar
-                point_widget = SurveyPointWidget(survey_point)
-                self.scene.addItem(point_widget)
-            
-            self.update_stats()
-            self.log(f"📈 Survey cargado: {os.path.basename(file_path)}")
+                # Cargar puntos de survey
+                for point_data in data.get('survey_points', []):
+                    try:
+                        # Reconstruir punto
+                        x = point_data['x']
+                        y = point_data['y']
+                        timestamp = datetime.fromisoformat(point_data['timestamp'])
+                        
+                        networks = []
+                        for net_data in point_data.get('networks', []):
+                            network = NetworkData(
+                                ssid=net_data['ssid'],
+                                bssid=net_data['bssid'],
+                                signal=net_data['signal'],
+                                frequency=net_data['frequency'],
+                                channel=net_data['channel'],
+                                security=net_data['security']
+                            )
+                            networks.append(network)
+                        
+                        iperf_results = None
+                        if point_data.get('iperf_results'):
+                            iperf_results = IperfResults()
+                            iperf_data = point_data['iperf_results']
+                            iperf_results.download_speed = iperf_data.get('download_speed', 0)
+                            iperf_results.upload_speed = iperf_data.get('upload_speed', 0)
+                            iperf_results.latency = iperf_data.get('latency', 0)
+                            iperf_results.jitter = iperf_data.get('jitter', 0)
+                        
+                        survey_point = SurveyPoint(
+                            x=x, 
+                            y=y, 
+                            timestamp=timestamp,
+                            networks=networks, 
+                            iperf_results=iperf_results
+                        )
+                        self.survey_points.append(survey_point)
+                        
+                        # Visualizar
+                        point_widget = SurveyPointWidget(survey_point)
+                        self.scene.addItem(point_widget)
+                    except Exception as e:
+                        print(f"Error cargando punto: {e}")
+                        continue
+                
+                self.update_stats()
+                self.log(f"📈 Survey cargado: {os.path.basename(file_path)}")
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Error cargando archivo: {str(e)}")
     
     def clear_heatmap(self):
         """Limpiar heatmap"""

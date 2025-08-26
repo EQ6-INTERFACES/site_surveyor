@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 🗃️ DATA MODELS - Site Surveyor Pro v16.0
-Modelos de datos completos y corregidos
+Modelos de datos completos y corregidos v2
 """
 
 from dataclasses import dataclass
@@ -52,6 +52,11 @@ class NetworkData:
     def noise_floor(self) -> int:
         """Alias para noise (compatibilidad)"""
         return self.noise
+    
+    @property
+    def rssi(self) -> int:
+        """Alias para signal (compatibilidad con main_window)"""
+        return self.signal
 
 class IperfResults:
     """Resultados de pruebas iPerf"""
@@ -100,7 +105,7 @@ class IperfResults:
 
 @dataclass
 class SurveyPoint:
-    """Punto de medición en el site survey"""
+    """Punto de medición en el site survey - CORREGIDO v2"""
     x: float
     y: float
     timestamp: datetime
@@ -137,6 +142,19 @@ class SurveyPoint:
         
         if snr_values:
             self.avg_snr = sum(snr_values) / len(snr_values)
+    
+    # AGREGADOS: Propiedades de compatibilidad con analysis modules
+    @property
+    def scan_data(self) -> List[NetworkData]:
+        """Alias para networks (compatibilidad con ap_locator)"""
+        return self.networks
+    
+    @property
+    def strongest_network(self) -> Optional[NetworkData]:
+        """Red con mejor señal (compatibilidad con heatmap)"""
+        if not self.networks:
+            return None
+        return max(self.networks, key=lambda n: n.signal)
     
     def get_network_by_ssid(self, ssid: str) -> Optional[NetworkData]:
         """Obtiene una red específica por SSID"""
@@ -194,6 +212,21 @@ class AccessPoint:
     def __post_init__(self):
         if self.detection_points is None:
             self.detection_points = []
+    
+    def to_dict(self) -> dict:
+        """Convierte AccessPoint a diccionario"""
+        return {
+            'bssid': self.bssid,
+            'ssid': self.ssid,
+            'estimated_x': self.estimated_x,
+            'estimated_y': self.estimated_y,
+            'confidence': self.confidence,
+            'channel': self.channel,
+            'vendor': self.vendor,
+            'frequency': self.frequency,
+            'security': self.security,
+            'max_signal': self.max_signal
+        }
 
 @dataclass
 class ProjectInfo:
@@ -255,3 +288,13 @@ class APPosition:
         # Mantener compatibilidad con AccessPoint
         self.estimated_x = self.x
         self.estimated_y = self.y
+    
+    def to_dict(self) -> dict:
+        """Convierte APPosition a diccionario"""
+        return {
+            'bssid': self.bssid,
+            'ssid': self.ssid,
+            'x': self.x,
+            'y': self.y,
+            'confidence': self.confidence
+        }
