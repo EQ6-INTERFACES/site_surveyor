@@ -1,4 +1,4 @@
-# ui/main_window.py - CORREGIDO
+# ui/main_window.py - CORREGIDO CON HEATMAPS POR SSID Y APs FUNCIONALES
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
@@ -10,11 +10,101 @@ from typing import Optional, List, Dict
 from core import Config, WiFiScanner, SurveyPoint, NetworkData, IperfResults, ProjectInfo
 from analysis import APLocator, HeatmapGenerator
 from reporting import ReportGenerator
-from .widgets import SurveyPointWidget, APWidget, ServiceMonitor, ZoomableGraphicsView
+from .widgets import SurveyPointWidget, APWidget, ServiceMonitor, ZoomableGraphicsView, HeatmapLegend
 from .styles import get_app_stylesheet
 
+class HeatmapDialog(QDialog):
+    """Diálogo para seleccionar opciones del heatmap"""
+    
+    def __init__(self, available_networks: List[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Generar Heatmap")
+        self.setModal(True)
+        self.resize(400, 300)
+        self.setStyleSheet(get_app_stylesheet())
+        
+        layout = QVBoxLayout(self)
+        
+        # Tipo de métrica
+        metric_group = QGroupBox("📊 Métrica a visualizar")
+        metric_layout = QVBoxLayout(metric_group)
+        
+        self.metric_combo = QComboBox()
+        self.metric_combo.addItems([
+            "RSSI (Señal WiFi)",
+            "SNR (Relación Señal/Ruido)",
+            "Download (Velocidad descarga)",
+            "Upload (Velocidad subida)",
+            "Ping (Latencia)",
+            "Jitter (Variación de latencia)"
+        ])
+        metric_layout.addWidget(self.metric_combo)
+        
+        layout.addWidget(metric_group)
+        
+        # Selección de red
+        network_group = QGroupBox("📡 Red específica (opcional)")
+        network_layout = QVBoxLayout(network_group)
+        
+        self.all_networks_radio = QRadioButton("Todas las redes (señal más fuerte)")
+        self.all_networks_radio.setChecked(True)
+        network_layout.addWidget(self.all_networks_radio)
+        
+        self.specific_network_radio = QRadioButton("Red específica:")
+        network_layout.addWidget(self.specific_network_radio)
+        
+        self.network_combo = QComboBox()
+        self.network_combo.setEnabled(False)
+        self.network_combo.addItems(["Seleccionar red..."] + available_networks)
+        network_layout.addWidget(self.network_combo)
+        
+        # Conectar radio buttons
+        self.specific_network_radio.toggled.connect(self.network_combo.setEnabled)
+        
+        layout.addWidget(network_group)
+        
+        # Botones
+        button_layout = QHBoxLayout()
+        
+        cancel_btn = QPushButton("Cancelar")
+        cancel_btn.clicked.connect(self.reject)
+        
+        generate_btn = QPushButton("Generar Heatmap")
+        generate_btn.clicked.connect(self.accept)
+        generate_btn.setStyleSheet("QPushButton { background: #4CAF50; }")
+        
+        button_layout.addWidget(cancel_btn)
+        button_layout.addStretch()
+        button_layout.addWidget(generate_btn)
+        
+        layout.addLayout(button_layout)
+    
+    def get_selected_options(self) -> dict:
+        """Retorna las opciones seleccionadas"""
+        metric_map = {
+            "RSSI (Señal WiFi)": "rssi",
+            "SNR (Relación Señal/Ruido)": "snr",
+            "Download (Velocidad descarga)": "download",
+            "Upload (Velocidad subida)": "upload",
+            "Ping (Latencia)": "ping",
+            "Jitter (Variación de latencia)": "jitter"
+        }
+        
+        metric = metric_map[self.metric_combo.currentText()]
+        
+        target_ssid = None
+        if self.specific_network_radio.isChecked() and self.network_combo.currentIndex() > 0:
+            target_ssid = self.network_combo.currentText()
+        
+        return {
+            'metric': metric,
+            'target_ssid': target_ssid,
+            'description': self.metric_combo.currentText() + 
+                         (f" - {target_ssid}" if target_ssid else " - Todas las redes")
+        }
+
 class MainWindow(QMainWindow):
-    """Ventana principal de Site Surveyor Pro"""
+    """Ventana principal de Site Surveyor Pro - CORREGIDA"""
     
     def __init__(self):
         super().__init__()
@@ -38,6 +128,7 @@ class MainWindow(QMainWindow):
         self.calibration_mode = False
         self.calibration_points = []
         self.current_networks = []
+        self.current_heatmap_legend = None  # Para la leyenda del heatmap
         
         # Inicializar UI
         self.create_ui()
@@ -51,6 +142,9 @@ class MainWindow(QMainWindow):
         self.wifi_timer = QTimer()
         self.wifi_timer.timeout.connect(self.scan_wifi)
         self.wifi_timer.start(self.config.get('wifi', 'scan_interval', 15) * 1000)
+        
+        # Hacer escaneo inicial
+        QTimer.singleShot(1000, self.scan_wifi)
     
     def create_ui(self):
         central_widget = QWidget()
@@ -108,7 +202,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction(ap_action)
         
         heatmap_action = QAction("🗺\nMapa", self)
-        heatmap_action.triggered.connect(self.generate_heatmap)
+        heatmap_action.triggered.connect(self.show_heatmap_dialog)
         toolbar.addAction(heatmap_action)
         
         report_action = QAction("📄\nReporte", self)
@@ -169,6 +263,16 @@ class MainWindow(QMainWindow):
         stats_layout.addWidget(self.stats_label)
         
         layout.addWidget(stats_group)
+        
+        # Información de calibración
+        cal_group = QGroupBox("📏 Calibración")
+        cal_layout = QVBoxLayout(cal_group)
+        
+        self.calibration_label = QLabel("Sin calibrar")
+        self.calibration_label.setStyleSheet("color: #f44336;")
+        cal_layout.addWidget(self.calibration_label)
+        
+        layout.addWidget(cal_group)
         layout.addStretch()
         
         return widget
@@ -211,8 +315,7 @@ class MainWindow(QMainWindow):
         header = QHBoxLayout()
         header.addWidget(QLabel("📊 Monitoreo de Servicios"))
         
-        self.toggle_all_btn = QPushButton("▶ Iniciar")
-        self.toggle_all_btn.setMaximumSize(60, 25)
+        self.toggle_all_btn = QPushButton("▶ Iniciar Todo")
         self.toggle_all_btn.clicked.connect(self.toggle_all_services)
         header.addWidget(self.toggle_all_btn)
         
@@ -342,7 +445,7 @@ class MainWindow(QMainWindow):
         self.log(f"📡 {len(networks)} redes detectadas")
     
     def update_wifi_table(self, networks: List[NetworkData]):
-        """Actualizar tabla de redes - CORREGIDO"""
+        """Actualizar tabla de redes"""
         self.wifi_table.setRowCount(len(networks))
         
         for row, network in enumerate(networks):
@@ -350,7 +453,6 @@ class MainWindow(QMainWindow):
             self.wifi_table.setItem(row, 1, QTableWidgetItem(network.bssid))
             
             rssi_item = QTableWidgetItem(f"{network.signal} dBm")
-            # CORREGIDO: Usar network.signal en lugar de network.rssi para comparación
             if network.signal >= -60:
                 rssi_item.setBackground(QColor(200, 255, 200))
             elif network.signal >= -70:
@@ -363,14 +465,16 @@ class MainWindow(QMainWindow):
             self.wifi_table.setItem(row, 4, QTableWidgetItem(network.security))
     
     def toggle_all_services(self):
-        """Toggle todos los servicios - CORREGIDO"""
+        """Toggle todos los servicios"""
         any_active = any(w.is_monitoring for w in self.service_widgets.values())
         
         for widget in self.service_widgets.values():
-            # CORREGIDO: Ahora usa toggle_monitoring() que existe
-            widget.toggle_monitoring()
+            if any_active:
+                widget.stop_monitoring()
+            else:
+                widget.start_monitoring()
         
-        self.toggle_all_btn.setText("⏸ Detener" if not any_active else "▶ Iniciar")
+        self.toggle_all_btn.setText("⏸ Detener Todo" if not any_active else "▶ Iniciar Todo")
     
     def load_floor_plan(self):
         """Cargar plano de piso"""
@@ -470,6 +574,9 @@ class MainWindow(QMainWindow):
                 
                 self.ap_locator.pixels_per_meter = self.pixels_per_meter
                 
+                self.calibration_label.setText(f"{self.pixels_per_meter:.2f} px/m")
+                self.calibration_label.setStyleSheet("color: #4CAF50;")
+                
                 self.log(f"📏 Escala: {self.pixels_per_meter:.2f} px/m")
                 QMessageBox.information(
                     self, "Calibración", 
@@ -480,15 +587,12 @@ class MainWindow(QMainWindow):
             self.calibration_points = []
     
     def handle_survey_click(self, x: float, y: float):
-        """Manejar click de survey - CORREGIDO"""
+        """Manejar click de survey"""
         # Escanear redes
         networks = self.scanner.scan()
         if not networks:
             QMessageBox.warning(self, "Error", "No se detectaron redes")
             return
-        
-        # CORREGIDO: Los networks ya son NetworkData, no necesitan conversión
-        network_data = networks
         
         # Realizar pruebas de rendimiento
         iperf_results = self.scanner.perform_full_test()
@@ -498,7 +602,7 @@ class MainWindow(QMainWindow):
             x=x, 
             y=y, 
             timestamp=datetime.now(),
-            networks=network_data, 
+            networks=networks, 
             iperf_results=iperf_results
         )
         self.survey_points.append(survey_point)
@@ -511,7 +615,7 @@ class MainWindow(QMainWindow):
         self.log(f"📍 Punto {len(self.survey_points)} medido")
     
     def estimate_aps(self):
-        """Estimar posiciones de APs"""
+        """Estimar posiciones de APs - CORREGIDO"""
         if not self.survey_points:
             QMessageBox.warning(self, "Sin Datos", "Se necesitan puntos de survey")
             return
@@ -520,55 +624,153 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Sin Calibración", "Primero calibre la escala")
             return
         
-        self.ap_positions = self.ap_locator.estimate_all_aps(self.survey_points)
-        
-        # Visualizar APs
-        for ap in self.ap_positions.values():
-            ap_widget = APWidget(ap)
-            self.scene.addItem(ap_widget)
-        
-        self.update_stats()
-        self.log(f"📡 {len(self.ap_positions)} APs estimados")
-        QMessageBox.information(self, "APs Estimados", 
-                               f"Se estimaron {len(self.ap_positions)} posiciones de APs")
+        try:
+            # CORREGIR: Configurar correctamente el localizador de APs
+            self.ap_locator = APLocator(pixels_per_meter=self.pixels_per_meter)
+            
+            # Estimar posiciones
+            estimated_aps = self.ap_locator.estimate_all_aps(self.survey_points)
+            self.ap_positions = estimated_aps
+            
+            # Limpiar APs anteriores del mapa
+            for item in self.scene.items():
+                if isinstance(item, APWidget):
+                    self.scene.removeItem(item)
+            
+            # Visualizar APs estimados
+            for bssid, ap_data in estimated_aps.items():
+                try:
+                    ap_widget = APWidget(ap_data)
+                    self.scene.addItem(ap_widget)
+                except Exception as e:
+                    print(f"Error agregando AP widget: {e}")
+            
+            self.update_stats()
+            self.log(f"📡 {len(estimated_aps)} APs estimados")
+            
+            # Mostrar resumen
+            if estimated_aps:
+                summary = "APs Localizados:\n\n"
+                for bssid, ap in estimated_aps.items():
+                    confidence = getattr(ap, 'confidence', 0)
+                    summary += f"• {ap.ssid}\n  Confianza: {confidence:.1%}\n\n"
+                
+                msg = QMessageBox(self)
+                msg.setWindowTitle("APs Estimados")
+                msg.setText(f"Se estimaron {len(estimated_aps)} posiciones de APs")
+                msg.setDetailedText(summary)
+                msg.exec()
+            else:
+                QMessageBox.warning(self, "Sin Resultados", 
+                                   "No se pudieron estimar posiciones de APs.\n"
+                                   "Verifique que tenga suficientes mediciones.")
+                
+        except Exception as e:
+            self.log(f"❌ Error estimando APs: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Error al estimar APs:\n{str(e)}")
     
-    def generate_heatmap(self):
-        """Generar mapa de calor"""
+    def show_heatmap_dialog(self):
+        """Mostrar diálogo para generar heatmap"""
         if len(self.survey_points) < 3:
             QMessageBox.warning(self, "Sin Datos", "Se necesitan al menos 3 puntos")
             return
         
-        # Obtener dimensiones del plano
-        pixmap_items = [item for item in self.scene.items() if isinstance(item, QGraphicsPixmapItem)]
-        if not pixmap_items:
-            return
+        # Obtener lista de SSIDs únicos
+        all_ssids = set()
+        for point in self.survey_points:
+            for network in point.networks:
+                all_ssids.add(network.ssid)
         
-        floor_plan = pixmap_items[0].pixmap()
-        width, height = floor_plan.width(), floor_plan.height()
+        sorted_ssids = sorted(list(all_ssids))
         
-        # Generar heatmap
-        from PIL import Image as PILImage
-        heatmap_pil = self.heatmap_gen.generate(self.survey_points, width, height, metric="rssi")
-        
-        # Convertir a QPixmap
-        image_data = heatmap_pil.tobytes("raw", "RGBA")
-        qimage = QImage(image_data, width, height, QImage.Format.Format_RGBA8888)
-        heatmap_pixmap = QPixmap.fromImage(qimage)
-        
-        # Remover heatmaps anteriores
-        for item in self.scene.items():
-            if item.zValue() == 1:
+        dialog = HeatmapDialog(sorted_ssids, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            options = dialog.get_selected_options()
+            self.generate_heatmap_with_options(options)
+    
+    def generate_heatmap_with_options(self, options: dict):
+        """Generar heatmap con opciones específicas"""
+        try:
+            # Obtener dimensiones del plano
+            pixmap_items = [item for item in self.scene.items() if isinstance(item, QGraphicsPixmapItem)]
+            if not pixmap_items:
+                QMessageBox.warning(self, "Sin Plano", "No hay plano cargado")
+                return
+            
+            floor_plan = pixmap_items[0].pixmap()
+            width, height = floor_plan.width(), floor_plan.height()
+            
+            # Buscar BSSID del SSID seleccionado si aplica
+            target_bssid = None
+            if options['target_ssid']:
+                for point in self.survey_points:
+                    for network in point.networks:
+                        if network.ssid == options['target_ssid']:
+                            target_bssid = network.bssid
+                            break
+                    if target_bssid:
+                        break
+            
+            # Generar heatmap
+            from PIL import Image as PILImage
+            heatmap_pil = self.heatmap_gen.generate(
+                self.survey_points, 
+                width, 
+                height, 
+                target_bssid=target_bssid,
+                metric=options['metric']
+            )
+            
+            # Convertir a QPixmap
+            image_data = heatmap_pil.tobytes("raw", "RGBA")
+            qimage = QImage(image_data, width, height, QImage.Format.Format_RGBA8888)
+            heatmap_pixmap = QPixmap.fromImage(qimage)
+            
+            # Remover heatmaps y leyendas anteriores
+            items_to_remove = []
+            for item in self.scene.items():
+                if item.zValue() == 1 or isinstance(item, HeatmapLegend):
+                    items_to_remove.append(item)
+            
+            for item in items_to_remove:
                 self.scene.removeItem(item)
-        
-        # Agregar heatmap
-        heatmap_item = self.scene.addPixmap(heatmap_pixmap)
-        heatmap_item.setZValue(1)
-        
-        self.update_stats()
-        self.log("🗺 Heatmap generado")
+            
+            if self.current_heatmap_legend:
+                try:
+                    self.scene.removeItem(self.current_heatmap_legend)
+                except:
+                    pass
+            
+            # Agregar nuevo heatmap
+            heatmap_item = self.scene.addPixmap(heatmap_pixmap)
+            heatmap_item.setZValue(1)
+            
+            # Agregar leyenda
+            legend = HeatmapLegend(options['metric'])
+            self.scene.addWidget(legend)
+            legend.setPos(20, 20)  # Posición fija en la esquina
+            legend.setZValue(2)
+            self.current_heatmap_legend = legend
+            
+            self.update_stats()
+            self.log(f"🗺 Heatmap generado: {options['description']}")
+            
+            # Actualizar información del plano
+            if options['target_ssid']:
+                self.floor_plan_info.setText(f"🗺 Heatmap: {options['target_ssid']} ({options['metric']})")
+            else:
+                self.floor_plan_info.setText(f"🗺 Heatmap: Todas las redes ({options['metric']})")
+            
+        except Exception as e:
+            self.log(f"❌ Error generando heatmap: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Error generando heatmap:\n{str(e)}")
+    
+    def generate_heatmap(self):
+        """Generar heatmap básico (para compatibilidad)"""
+        self.show_heatmap_dialog()
     
     def generate_report(self):
-        """Generar reporte PDF"""
+        """Generar reporte PDF con datos de servicios"""
         if not self.survey_points:
             QMessageBox.warning(self, "Sin Datos", "No hay datos para el reporte")
             return
@@ -583,18 +785,46 @@ class MainWindow(QMainWindow):
             self.project_info.name = self.site_entry.text()
             self.project_info.location = self.site_entry.text()
             
+            # Recopilar estadísticas de servicios
+            service_stats = []
+            for service_widget in self.service_widgets.values():
+                stats = service_widget.get_statistics()
+                service_stats.append(stats)
+            
             # Generar reporte
             generator = ReportGenerator()
             success_path = generator.generate_report(
                 survey_points=self.survey_points,
                 networks=self.current_networks,
                 project_info=self.project_info.__dict__,
+                service_stats=service_stats,  # Agregar estadísticas de servicios
                 output_path=file_path
             )
             
             if success_path:
                 QMessageBox.information(self, "Reporte", "Reporte generado exitosamente")
                 self.log(f"📄 Reporte generado: {os.path.basename(file_path)}")
+                
+                # Preguntar si abrir el archivo
+                reply = QMessageBox.question(
+                    self, "Abrir Reporte", 
+                    "¿Desea abrir el reporte generado?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                
+                if reply == QMessageBox.StandardButton.Yes:
+                    import subprocess
+                    import platform
+                    
+                    try:
+                        if platform.system() == 'Windows':
+                            subprocess.run(['start', file_path], shell=True)
+                        elif platform.system() == 'Darwin':  # macOS
+                            subprocess.run(['open', file_path])
+                        else:  # Linux
+                            subprocess.run(['xdg-open', file_path])
+                    except Exception as e:
+                        self.log(f"No se pudo abrir el reporte: {e}")
             else:
                 QMessageBox.critical(self, "Error", "Error generando reporte")
     
@@ -618,6 +848,7 @@ class MainWindow(QMainWindow):
                     'pixels_per_meter': self.pixels_per_meter
                 },
                 'survey_points': [p.to_dict() for p in self.survey_points],
+                'ap_positions': {k: v.__dict__ for k, v in self.ap_positions.items()},
                 'timestamp': datetime.now().isoformat()
             }
             
@@ -642,6 +873,12 @@ class MainWindow(QMainWindow):
                 self.client_entry.setText(project.get('client_name', ''))
                 self.site_entry.setText(project.get('site_name', ''))
                 self.technician_entry.setText(project.get('technician_name', ''))
+                self.pixels_per_meter = project.get('pixels_per_meter')
+                
+                if self.pixels_per_meter:
+                    self.calibration_label.setText(f"{self.pixels_per_meter:.2f} px/m")
+                    self.calibration_label.setStyleSheet("color: #4CAF50;")
+                    self.ap_locator.pixels_per_meter = self.pixels_per_meter
                 
                 # Limpiar puntos existentes
                 self.survey_points = []
@@ -699,9 +936,21 @@ class MainWindow(QMainWindow):
     
     def clear_heatmap(self):
         """Limpiar heatmap"""
+        items_to_remove = []
         for item in self.scene.items():
-            if item.zValue() == 1:
-                self.scene.removeItem(item)
+            if item.zValue() == 1 or isinstance(item, HeatmapLegend):
+                items_to_remove.append(item)
+        
+        for item in items_to_remove:
+            self.scene.removeItem(item)
+        
+        if self.current_heatmap_legend:
+            self.current_heatmap_legend = None
+        
+        # Restaurar información del plano
+        if self.floor_plan_path:
+            filename = os.path.basename(self.floor_plan_path)
+            self.floor_plan_info.setText(f"📂 {filename}")
         
         self.update_stats()
         self.log("🗑 Heatmap limpiado")
@@ -721,6 +970,10 @@ class MainWindow(QMainWindow):
     
     def closeEvent(self, event):
         """Al cerrar la aplicación"""
+        # Detener servicios de monitoreo
+        for service_widget in self.service_widgets.values():
+            service_widget.stop_monitoring()
+        
         self.scanner.stop_iperf_server()
         
         if self.survey_points:
